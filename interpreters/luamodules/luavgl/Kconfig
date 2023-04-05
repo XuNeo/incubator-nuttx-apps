@@ -1,0 +1,21 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config LUA_LUAVGL_MODULE
+	bool "Lua LVGL binding module luavgl"
+	default n
+	depends on INTERPRETERS_LUA && GRAPHICS_LVGL
+	---help---
+		Bare lvgl bindings for Lua
+
+if LUA_LUAVGL_MODULE
+
+config LUA_LUAVGL_VERSION
+	string "Luavgl version"
+	default "0.0.1"
+	---help---
+		Luavgl release version to fetch and build.
+
+endif # LUA_LUAVGL_MODULE
