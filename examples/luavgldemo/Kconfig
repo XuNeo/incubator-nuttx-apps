@@ -1,0 +1,23 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+menuconfig EXAMPLES_LUAVGLDEMO
+	tristate "luavgl demo"
+	default n
+	depends on LUA_LUAVGL_MODULE
+	---help---
+		Enable build lvgl lua binding luavgl demo
+
+if EXAMPLES_LUAVGLDEMO
+
+config EXAMPLES_LUAVGLDEMO_PRIORITY
+	int "luavgldemo task priority"
+	default 100
+
+config EXAMPLES_LUAVGLDEMO_STACKSIZE
+	int "luavgldemo stack size"
+	default 16384
+
+endif # EXAMPLES_LUAVGLDEMO
