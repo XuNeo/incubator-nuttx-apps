@@ -33,6 +33,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <time.h>
+#include <sched.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/ioctl.h>
@@ -320,6 +321,58 @@ static int test_timer(void)
   return 0;
 }
 
+#ifdef CONFIG_SMP
+static volatile int g_smp_counter[CONFIG_SMP_NCPUS];
+
+static int smp_worker(int argc, FAR char *argv[])
+{
+  int cpu = sched_getcpu();
+  int i;
+
+  for (i = 0; i < 1000; i++)
+    {
+      g_smp_counter[cpu]++;
+    }
+
+  return 0;
+}
+
+static int test_smp(void)
+{
+  pid_t pid0;
+  pid_t pid1;
+  int status;
+  int i;
+
+  for (i = 0; i < CONFIG_SMP_NCPUS; i++)
+    {
+      g_smp_counter[i] = 0;
+    }
+
+  pid0 = task_create("smp0", 100, 2048, smp_worker, NULL);
+  pid1 = task_create("smp1", 100, 2048, smp_worker, NULL);
+
+  if (pid0 < 0 || pid1 < 0)
+    {
+      printf("[FAIL] test_smp: task_create: %d %d\n", pid0, pid1);
+      return -1;
+    }
+
+  waitpid(pid0, &status, 0);
+  waitpid(pid1, &status, 0);
+
+  if (g_smp_counter[0] == 0 && g_smp_counter[1] == 0)
+    {
+      printf("[FAIL] test_smp: no CPU executed work\n");
+      return -1;
+    }
+
+  printf("[PASS] test_smp (cpu0=%d cpu1=%d)\n",
+         g_smp_counter[0], g_smp_counter[1]);
+  return 0;
+}
+#endif
+
 static int test_i2c(void)
 {
   int fd;
@@ -475,6 +528,14 @@ int main(int argc, FAR char *argv[])
     {
       fail_count++;
     }
+
+#ifdef CONFIG_SMP
+  printf("--- SMP Test ---\n");
+  if (test_smp() < 0)
+    {
+      fail_count++;
+    }
+#endif
 
   printf("=== T113 Test Complete: %s (%d failures) ===\n",
          fail_count == 0 ? "ALL PASS" : "FAIL", fail_count);
