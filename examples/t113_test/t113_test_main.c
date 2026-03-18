@@ -34,7 +34,9 @@
 #include <errno.h>
 #include <time.h>
 #include <sys/mount.h>
+#include <sys/stat.h>
 #include <sys/ioctl.h>
+#include <dirent.h>
 
 #include <nuttx/mtd/mtd.h>
 
@@ -318,6 +320,113 @@ static int test_timer(void)
   return 0;
 }
 
+static int test_i2c(void)
+{
+  int fd;
+
+  fd = open("/dev/i2c0", O_RDWR);
+  if (fd < 0)
+    {
+      printf("[FAIL] test_i2c: open /dev/i2c0: %d\n", errno);
+      return -1;
+    }
+
+  close(fd);
+  printf("[PASS] test_i2c\n");
+  return 0;
+}
+
+static int test_littlefs_multi(void)
+{
+  char path[64];
+  char wbuf[48];
+  char rbuf[48];
+  int fd;
+  int ret;
+  ssize_t n;
+  int i;
+
+  ret = mount("/dev/mtd1", LFS_MOUNT_POINT, "littlefs", 0, "autoformat");
+  if (ret < 0)
+    {
+      printf("[FAIL] test_lfs_multi: mount: %d\n", errno);
+      return -1;
+    }
+
+  for (i = 0; i < 5; i++)
+    {
+      snprintf(path, sizeof(path), "%s/f%d.txt", LFS_MOUNT_POINT, i);
+      snprintf(wbuf, sizeof(wbuf), "file-%d-data-%08x", i, i * 0x12345);
+      fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+      if (fd < 0)
+        {
+          printf("[FAIL] test_lfs_multi: create %s: %d\n", path, errno);
+          goto fail;
+        }
+
+      write(fd, wbuf, strlen(wbuf));
+      close(fd);
+    }
+
+  for (i = 0; i < 5; i++)
+    {
+      snprintf(path, sizeof(path), "%s/f%d.txt", LFS_MOUNT_POINT, i);
+      snprintf(wbuf, sizeof(wbuf), "file-%d-data-%08x", i, i * 0x12345);
+      fd = open(path, O_RDONLY);
+      if (fd < 0)
+        {
+          printf("[FAIL] test_lfs_multi: open %s: %d\n", path, errno);
+          goto fail;
+        }
+
+      memset(rbuf, 0, sizeof(rbuf));
+      n = read(fd, rbuf, sizeof(rbuf) - 1);
+      close(fd);
+      if (n != (ssize_t)strlen(wbuf) ||
+          memcmp(rbuf, wbuf, strlen(wbuf)) != 0)
+        {
+          printf("[FAIL] test_lfs_multi: verify %s\n", path);
+          goto fail;
+        }
+    }
+
+  for (i = 0; i < 5; i++)
+    {
+      snprintf(path, sizeof(path), "%s/f%d.txt", LFS_MOUNT_POINT, i);
+      unlink(path);
+    }
+
+  umount(LFS_MOUNT_POINT);
+
+  ret = mount("/dev/mtd1", LFS_MOUNT_POINT, "littlefs", 0, NULL);
+  if (ret < 0)
+    {
+      printf("[FAIL] test_lfs_multi: remount: %d\n", errno);
+      return -1;
+    }
+
+  for (i = 0; i < 5; i++)
+    {
+      snprintf(path, sizeof(path), "%s/f%d.txt", LFS_MOUNT_POINT, i);
+      fd = open(path, O_RDONLY);
+      if (fd >= 0)
+        {
+          close(fd);
+          printf("[FAIL] test_lfs_multi: %s still exists\n", path);
+          umount(LFS_MOUNT_POINT);
+          return -1;
+        }
+    }
+
+  umount(LFS_MOUNT_POINT);
+  printf("[PASS] test_lfs_multi\n");
+  return 0;
+
+fail:
+  umount(LFS_MOUNT_POINT);
+  return -1;
+}
+
 /****************************************************************************
  * Public Functions
  ****************************************************************************/
@@ -349,8 +458,20 @@ int main(int argc, FAR char *argv[])
       fail_count++;
     }
 
+  printf("--- LittleFS Multi-file Test ---\n");
+  if (test_littlefs_multi() < 0)
+    {
+      fail_count++;
+    }
+
   printf("--- Timer Test ---\n");
   if (test_timer() < 0)
+    {
+      fail_count++;
+    }
+
+  printf("--- I2C Bus Test ---\n");
+  if (test_i2c() < 0)
     {
       fail_count++;
     }
