@@ -233,12 +233,15 @@ int main(int argc, FAR char *argv[])
           continue;
         }
 
-      if (verify_erased(rbuf, geo.blocksize) >= 0)
-        {
-          printf("[FAIL] mtd_erase_verify: block %d not erased\n",
-                 erase_blk);
-          fail_count++;
-        }
+      {
+        int bad = verify_erased(rbuf, geo.blocksize);
+        if (bad >= 0)
+          {
+            printf("[FAIL] mtd_erase_verify: block %d byte %d = 0x%02x\n",
+                   erase_blk, bad, rbuf[bad]);
+            fail_count++;
+          }
+      }
     }
 
   if (fail_count == 0)
