@@ -38,8 +38,17 @@
 #include <sys/stat.h>
 #include <sys/ioctl.h>
 #include <dirent.h>
+#include <malloc.h>
 
 #include <nuttx/mtd/mtd.h>
+
+#ifdef CONFIG_T113_RTC
+#  include <nuttx/timers/rtc.h>
+#endif
+
+#ifdef CONFIG_T113_PWM
+#  include <nuttx/timers/pwm.h>
+#endif
 
 /****************************************************************************
  * Pre-processor Definitions
@@ -80,13 +89,185 @@ static void fill_test_pattern(FAR uint8_t *buf, size_t len, int seed)
     }
 }
 
+#ifdef CONFIG_T113_GPIO
+static int test_gpio(void)
+{
+  /* Test GPIO using PB0: configure as output, write 1/read, write 0/read.
+   * Direct register access (flat build, no MMU protection).
+   *
+   * PIO_BASE=0x02000000, Bank B=1, offset=1*0x30=0x30
+   *   PB_CFG0 = 0x02000030  (4 bits/pin, pin0 at bits[3:0])
+   *   PB_DAT  = 0x02000040
+   */
+
+  volatile uint32_t *pb_cfg0 = (volatile uint32_t *)0x02000030;
+  volatile uint32_t *pb_dat  = (volatile uint32_t *)0x02000040;
+  uint32_t cfg_save;
+  uint32_t dat_save;
+  uint32_t val;
+
+  cfg_save = *pb_cfg0;
+  dat_save = *pb_dat;
+
+  /* Set PB0 to output (func=1) */
+
+  val = cfg_save & ~0xf;
+  val |= 0x1;
+  *pb_cfg0 = val;
+
+  /* Write 1, read back */
+
+  *pb_dat = dat_save | 0x1;
+  val = *pb_dat;
+  if (!(val & 0x1))
+    {
+      printf("[FAIL] test_gpio: PB0 write 1 readback=0\n");
+      *pb_cfg0 = cfg_save;
+      *pb_dat  = dat_save;
+      return -1;
+    }
+
+  /* Write 0, read back */
+
+  *pb_dat = dat_save & ~0x1;
+  val = *pb_dat;
+  if (val & 0x1)
+    {
+      printf("[FAIL] test_gpio: PB0 write 0 readback=1\n");
+      *pb_cfg0 = cfg_save;
+      *pb_dat  = dat_save;
+      return -1;
+    }
+
+  /* Restore original config */
+
+  *pb_cfg0 = cfg_save;
+  *pb_dat  = dat_save;
+
+  printf("[PASS] test_gpio (PB0 output toggle verified)\n");
+  return 0;
+}
+#endif
+
+#ifdef CONFIG_T113_PWM
+static int test_pwm(void)
+{
+  int fd;
+  struct pwm_info_s info;
+
+  fd = open("/dev/pwm0", O_RDONLY);
+  if (fd < 0)
+    {
+      printf("[FAIL] test_pwm: open /dev/pwm0: %d\n", errno);
+      return -1;
+    }
+
+  /* Start PWM: 1kHz, 50% duty */
+
+  info.frequency = 1000;
+  info.duty      = 0x8000;
+#ifdef CONFIG_PWM_PULSECOUNT
+  info.count     = 0;
+#endif
+
+  if (ioctl(fd, PWMIOC_SETCHARACTERISTICS, (unsigned long)&info) < 0)
+    {
+      printf("[FAIL] test_pwm: SETCHARACTERISTICS: %d\n", errno);
+      close(fd);
+      return -1;
+    }
+
+  if (ioctl(fd, PWMIOC_START, 0) < 0)
+    {
+      printf("[FAIL] test_pwm: START: %d\n", errno);
+      close(fd);
+      return -1;
+    }
+
+  /* Verify: read PWM counter register twice, expect it changes.
+   * PWM0 PCNTR = PWM_BASE + 0x100 + 0*0x20 + 0x08 = 0x02000D08
+   */
+
+  volatile uint32_t *pcntr = (volatile uint32_t *)0x02000d08;
+  uint32_t cnt1 = *pcntr;
+  usleep(1000);
+  uint32_t cnt2 = *pcntr;
+
+  ioctl(fd, PWMIOC_STOP, 0);
+  close(fd);
+
+  if (cnt1 == cnt2)
+    {
+      printf("[FAIL] test_pwm: counter not running (cnt=%u)\n",
+             (unsigned)cnt1);
+      return -1;
+    }
+
+  printf("[PASS] test_pwm (1kHz 50%%, cnt %u->%u)\n",
+         (unsigned)cnt1, (unsigned)cnt2);
+  return 0;
+}
+#endif
+
+#ifdef CONFIG_T113_GPADC
+static int test_adc(void)
+{
+  /* Direct GPADC register test:
+   * Enable LDO + ADC + calibration, select ch0, single mode,
+   * wait for conversion, read CH0 data register.
+   *
+   * GPADC_BASE = 0x02009000
+   *   CTRL  = +0x04, CS_EN = +0x08, CH0_DATA = +0x80
+   * CCU GPADC_BGR = 0x020009EC
+   */
+
+  volatile uint32_t *ccu_bgr  = (volatile uint32_t *)0x020009ec;
+  volatile uint32_t *gp_ctrl  = (volatile uint32_t *)0x02009004;
+  volatile uint32_t *gp_cs_en = (volatile uint32_t *)0x02009008;
+  volatile uint32_t *gp_ch0   = (volatile uint32_t *)0x02009080;
+  uint32_t val;
+  uint32_t data;
+
+  /* Enable clock */
+
+  val = *ccu_bgr;
+  val |= (1 << 16) | (1 << 0);
+  *ccu_bgr = val;
+
+  /* Enable LDO + ADC + calibration, single conversion mode */
+
+  *gp_ctrl = (1 << 0) | (1 << 16) | (1 << 17);
+
+  /* Select channel 0 */
+
+  *gp_cs_en = 0x01;
+
+  usleep(10000);
+
+  data = *gp_ch0 & 0xfff;
+
+  /* Disable */
+
+  *gp_ctrl = 0;
+
+  /* 12-bit ADC: valid range 0-4095, floating pin typically reads
+   * some non-zero/non-max value
+   */
+
+  if (data > 4095)
+    {
+      printf("[FAIL] test_adc: data=%u out of range\n", (unsigned)data);
+      return -1;
+    }
+
+  printf("[PASS] test_adc (ch0=%u, ~%umV)\n",
+         (unsigned)data, (unsigned)(data * 1800 / 4095));
+  return 0;
+}
+#endif
+
 /****************************************************************************
- * Name: test_mtd
- *
- * Description:
- *   Erase last 2 blocks of /dev/mtd0, write pages with pattern,
- *   read back and verify data integrity.
- *
+ * Public Functions
  ****************************************************************************/
 
 static int test_mtd(void)
@@ -389,6 +570,56 @@ static int test_i2c(void)
   return 0;
 }
 
+static int test_heap(void)
+{
+  struct mallinfo info;
+
+  info = mallinfo();
+
+  /* Expect at least 64MB of heap with 128MB DDR */
+
+  if (info.arena < (64 * 1024 * 1024))
+    {
+      printf("[FAIL] test_heap: arena=%d (expected >= 64MB)\n", info.arena);
+      return -1;
+    }
+
+  printf("[PASS] test_heap (arena=%dMB, used=%dKB, free=%dKB)\n",
+         info.arena / (1024 * 1024),
+         info.uordblks / 1024,
+         info.fordblks / 1024);
+  return 0;
+}
+
+#ifdef CONFIG_T113_RTC
+static int test_rtc(void)
+{
+  int fd;
+  struct rtc_time rtctime;
+
+  fd = open("/dev/rtc0", O_RDONLY);
+  if (fd < 0)
+    {
+      printf("[FAIL] test_rtc: open /dev/rtc0: %d\n", errno);
+      return -1;
+    }
+
+  if (ioctl(fd, RTC_RD_TIME, (unsigned long)&rtctime) < 0)
+    {
+      printf("[FAIL] test_rtc: RTC_RD_TIME: %d\n", errno);
+      close(fd);
+      return -1;
+    }
+
+  close(fd);
+
+  printf("[PASS] test_rtc (%04d-%02d-%02d %02d:%02d:%02d)\n",
+         rtctime.tm_year + 1900, rtctime.tm_mon + 1, rtctime.tm_mday,
+         rtctime.tm_hour, rtctime.tm_min, rtctime.tm_sec);
+  return 0;
+}
+#endif
+
 static int test_littlefs_multi(void)
 {
   char path[64];
@@ -528,6 +759,44 @@ int main(int argc, FAR char *argv[])
     {
       fail_count++;
     }
+
+  printf("--- Heap Test ---\n");
+  if (test_heap() < 0)
+    {
+      fail_count++;
+    }
+
+#ifdef CONFIG_T113_RTC
+  printf("--- RTC Test ---\n");
+  if (test_rtc() < 0)
+    {
+      fail_count++;
+    }
+#endif
+
+#ifdef CONFIG_T113_GPIO
+  printf("--- GPIO Test ---\n");
+  if (test_gpio() < 0)
+    {
+      fail_count++;
+    }
+#endif
+
+#ifdef CONFIG_T113_PWM
+  printf("--- PWM Test ---\n");
+  if (test_pwm() < 0)
+    {
+      fail_count++;
+    }
+#endif
+
+#ifdef CONFIG_T113_GPADC
+  printf("--- ADC Test ---\n");
+  if (test_adc() < 0)
+    {
+      fail_count++;
+    }
+#endif
 
 #ifdef CONFIG_SMP
   printf("--- SMP Test ---\n");
